@@ -1,0 +1,9 @@
+# Optional overlay. Use it only when systemd exits without full privileges:
+#   docker compose -f docker-compose.yml -f compose.privileged.yml up -d
+#
+# privileged: true makes the container root-equivalent on the Docker host.
+# Prefer the cap_add settings in docker-compose.yml when they are enough.
+
+services:
+  unifi-os-server:
+    privileged: true

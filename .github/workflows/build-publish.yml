@@ -1,0 +1,160 @@
+name: Build and publish
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*", "[0-9]*"]
+  workflow_dispatch:
+    inputs:
+      push:
+        description: Push the image to GHCR
+        type: boolean
+        default: true
+      fail_on_vulnerabilities:
+        description: Fail the job on HIGH or CRITICAL Trivy findings
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    name: Build, scan, smoke, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Decide publish and scan policy
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PUSH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.push || '' }}
+          INPUT_FAIL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fail_on_vulnerabilities || '' }}
+          VAR_TRIVY: ${{ vars.TRIVY_EXIT_CODE }}
+        run: |
+          set -euo pipefail
+          publish="$(EVENT_NAME="${EVENT_NAME}" INPUT_PUSH="${INPUT_PUSH}" bash scripts/should-publish.sh)"
+          trivy="$(EVENT_NAME="${EVENT_NAME}" INPUT_FAIL="${INPUT_FAIL}" VAR_TRIVY="${VAR_TRIVY}" bash scripts/resolve-trivy-exit-code.sh)"
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          version="$(jq -r '.version' versions.json)"
+          short="${GITHUB_SHA::7}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [[ "${tag}" != "${version}" ]]; then
+              printf 'Git tag %s does not match versions.json (%s).\n' "${GITHUB_REF_NAME}" "${version}" >&2
+              exit 1
+            fi
+          fi
+          {
+            echo "publish=${publish}"
+            echo "trivy_exit=${trivy}"
+            echo "owner=${owner}"
+            echo "version=${version}"
+            echo "short=${short}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the amd64 image for tests
+        env:
+          VERSION: ${{ steps.policy.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --platform linux/amd64 \
+            --build-arg "UOS_VERSION=${VERSION}" \
+            --build-arg "SOURCE_REPO=https://github.com/${GITHUB_REPOSITORY}" \
+            --tag unifi-os-server:local \
+            --load \
+            --provenance=false \
+            --sbom=false \
+            --progress plain \
+            .
+
+      - name: Structural check
+        run: bash scripts/structural-check.sh unifi-os-server:local
+
+      - name: Trivy vulnerability scan
+        env:
+          TRIVY_EXIT_CODE: ${{ steps.policy.outputs.trivy_exit }}
+        run: bash scripts/scan-image.sh unifi-os-server:local
+
+      - name: Upload Trivy SARIF
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      - name: Smoke test
+        env:
+          UOS_IMAGE: unifi-os-server:local
+          UOS_SYSTEM_IP: 127.0.0.1
+          SMOKE_REQUIRE_UI: "true"
+          SMOKE_UI_TIMEOUT: "600"
+        run: bash scripts/smoke-test.sh
+
+      - name: Log in to GHCR
+        if: steps.policy.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the multi-arch image
+        if: steps.policy.outputs.publish == 'true'
+        env:
+          OWNER: ${{ steps.policy.outputs.owner }}
+          VERSION: ${{ steps.policy.outputs.version }}
+          SHORT: ${{ steps.policy.outputs.short }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER}/unifi-os-server"
+          amd64="${image}:${VERSION}-${SHORT}-amd64"
+          arm64="${image}:${VERSION}-${SHORT}-arm64"
+          primary="${image}:${VERSION}-${SHORT}"
+          stable="${image}:${VERSION}"
+          docker tag unifi-os-server:local "${amd64}"
+          docker push "${amd64}"
+          docker buildx build \
+            --file Dockerfile \
+            --platform linux/arm64 \
+            --build-arg "UOS_VERSION=${VERSION}" \
+            --build-arg "SOURCE_REPO=https://github.com/${GITHUB_REPOSITORY}" \
+            --tag "${arm64}" \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            --progress plain \
+            .
+          docker buildx imagetools create --tag "${primary}" "${amd64}" "${arm64}"
+          docker buildx imagetools create --tag "${stable}" "${primary}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            docker buildx imagetools create --tag "${image}:${GITHUB_REF_NAME}" "${primary}"
+          fi
+          printf 'Published %s and %s\n' "${primary}" "${stable}"
+
+      - name: Confirm the GHCR package is private
+        if: steps.policy.outputs.publish == 'true'
+        env:
+          OWNER: ${{ steps.policy.outputs.owner }}
+          VERSION: ${{ steps.policy.outputs.version }}
+          SHORT: ${{ steps.policy.outputs.short }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ensure-ghcr-private.sh "${OWNER}" unifi-os-server "${VERSION}-${SHORT}"

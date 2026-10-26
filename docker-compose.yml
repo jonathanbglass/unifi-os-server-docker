@@ -1,0 +1,90 @@
+# UniFi OS Server and the external MongoDB it uses.
+#
+# Copy .env.example to .env and set UOS_SYSTEM_IP before `docker compose up -d`.
+# The web UI is https://<host>:11443 once systemd has finished starting.
+#
+# This file does not set privileged: true. It adds NET_ADMIN and NET_RAW and
+# uses the host cgroup namespace, which is enough on many Docker hosts. If
+# systemd exits because it cannot set up cgroups, add privileged: true under
+# unifi-os-server. That mode is root-equivalent on the host. Read the README
+# before enabling it.
+
+services:
+  unifi-os-server:
+    image: ${UOS_IMAGE:-ghcr.io/jonathanbglass/unifi-os-server:5.1.42}
+    cgroup: host
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # privileged: true
+    environment:
+      TZ: ${TZ:-UTC}
+      UOS_SYSTEM_IP: ${UOS_SYSTEM_IP:-}
+      UOS_SHOW_JOURNAL: ${UOS_SHOW_JOURNAL:-true}
+      MONGO_INTERNAL: "false"
+      MONGO_HOST: mongodb
+      MONGO_PORT: "27017"
+      MONGO_USER: ${MONGO_USER:-}
+      MONGO_PASS: ${MONGO_PASS:-}
+      MONGO_TLS: ${MONGO_TLS:-false}
+      MONGO_AUTH_SOURCE: ${MONGO_AUTH_SOURCE:-admin}
+    ports:
+      - "11443:443" # Web UI (HTTPS). Browse https://<host>:11443
+      - "8443:8443" # Network application HTTPS
+      - "8080:8080" # Device inform, http://<host>:8080/inform
+      - "8444:8444" # Secure hotspot portal
+      - "8880:8880" # Hotspot portal redirect
+      - "8881:8881" # Hotspot portal redirect
+      - "8882:8882" # Hotspot portal redirect
+      - "6789:6789" # Mobile speed test
+      - "9543:9543" # UniFi Identity hub
+      - "5671:5671" # AMQP over TLS
+      - "28082:28082" # Device support file download
+      - "3478:3478/udp" # STUN, required for remote devices
+      - "5514:5514/udp" # Remote syslog
+      - "10003:10003/udp" # Local device discovery
+      - "127.0.0.1:11084:11084" # UCORE on the host loopback only
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ${DATA_DIR:-./data/unifi}:/data
+      - ${UNIFI_DIR:-./data/var-lib-unifi}:/var/lib/unifi
+      - ${MONGODB_LIB_DIR:-./data/var-lib-mongodb}:/var/lib/mongodb
+      - ${RABBITMQ_SSL_DIR:-./data/etc-rabbitmq-ssl}:/etc/rabbitmq/ssl
+    tmpfs:
+      - /run:exec,mode=755
+      - /run/lock:mode=755
+      - /tmp:exec,mode=1777
+      - /var/log/journal:mode=755
+      - /var/opt/unifi/tmp:size=64m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/443"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+
+  mongodb:
+    image: ${MONGO_IMAGE:-mongo:4.4.29}
+    restart: unless-stopped
+    # Port 27017 stays on the compose network. Do not publish it.
+    command: ["mongod", "--bind_ip_all"]
+    volumes:
+      - ${MONGO_DATA_DIR:-./data/mongodb}:/data/db
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "mongo", "--quiet", "--eval", "quit(db.runCommand({ ping: 1 }).ok ? 0 : 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s

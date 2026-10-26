@@ -1,0 +1,8 @@
+ignored:
+  # The final image is systemd and has to run as root.
+  - DL3002
+  # The extractor stage installs curl and python3, then throws the stage away.
+  - DL3008
+  # The extractor runs on the builder CPU and unpacks the target architecture.
+  - DL3029
+failure-threshold: warning

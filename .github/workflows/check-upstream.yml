@@ -1,0 +1,68 @@
+name: Check upstream UniFi OS Server
+
+on:
+  schedule:
+    # Monday 06:17 UTC. The pin moves only when this workflow opens a pull request.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    name: Compare the pin with Ubiquiti
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Compare versions.json with the firmware API
+        id: check
+        run: |
+          set -euo pipefail
+          python3 scripts/check_upstream.py \
+            --versions versions.json \
+            --json-out "${RUNNER_TEMP}/upstream.json"
+          status="$(jq -r '.status' "${RUNNER_TEMP}/upstream.json")"
+          version="$(jq -r '.firmware_version // empty' "${RUNNER_TEMP}/upstream.json")"
+          {
+            echo "status=${status}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+          jq -r '.warnings[]? // empty' "${RUNNER_TEMP}/upstream.json"
+
+      - name: Open a pull request for a newer release
+        if: steps.check.outputs.status == 'update_available'
+        env:
+          NEW_VERSION: ${{ steps.check.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_upstream.py --versions versions.json --apply
+          branch="uos-pin-${NEW_VERSION}"
+          existing="$(gh pr list --head "${branch}" --base main --state open --json number --jq 'length')"
+          if [[ "${existing}" != "0" ]]; then
+            echo "An open pull request already uses ${branch}."
+            exit 0
+          fi
+          cat > "${RUNNER_TEMP}/upstream-pr.md" <<EOF
+          Ubiquiti's firmware API reports UniFi OS Server ${NEW_VERSION} for both linux-x64 and linux-arm64, with SHA256 checksums.
+
+          This pull request updates versions.json and the version strings in the Dockerfile, compose file, .env.example, and README. It does not build or publish an image. Merging it to main starts the build workflow.
+
+          Test the image before adopting it on a controller that manages real devices. Back up ./data first.
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git add versions.json Dockerfile docker-compose.yml .env.example README.md
+          git commit -m "Pin UniFi OS Server ${NEW_VERSION}"
+          git push --set-upstream origin "${branch}"
+          gh pr create \
+            --base main \
+            --head "${branch}" \
+            --title "Pin UniFi OS Server ${NEW_VERSION}" \
+            --body-file "${RUNNER_TEMP}/upstream-pr.md"
