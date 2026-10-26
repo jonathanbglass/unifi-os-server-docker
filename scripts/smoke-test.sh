@@ -46,6 +46,32 @@ compose() {
   fi
 }
 
+# Container processes create root-owned files. A plain rm prints
+# "Permission denied" for each of them and leaves the tree behind.
+remove_smoke_data() {
+  local target="$1"
+  local image="${2:-${UOS_IMAGE:-unifi-os-server:local}}"
+  [[ -e "$target" ]] || return 0
+  if rm -rf "$target" 2>/dev/null; then
+    return 0
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    docker run --rm --entrypoint /bin/sh \
+      -v "${target}:/cleanup" \
+      "$image" \
+      -c 'cd /cleanup && find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +' \
+      >/dev/null 2>&1 || true
+    rm -rf "$target" 2>/dev/null || true
+  fi
+  if [[ -e "$target" ]] && command -v sudo >/dev/null 2>&1; then
+    sudo -n rm -rf "$target" >/dev/null 2>&1 || true
+  fi
+  if [[ -e "$target" ]]; then
+    printf 'Could not remove smoke data at %s\n' "$target" >&2
+    return 1
+  fi
+}
+
 # Invoked from the EXIT trap, which shellcheck treats as unreachable.
 # shellcheck disable=SC2317
 dump_diagnostics() {
@@ -98,8 +124,7 @@ cleanup() {
   compose ps > "$logdir/ps.txt" 2>&1
   compose down --remove-orphans > "$logdir/down.log" 2>&1
   if [[ "$status" -eq 0 && "${SMOKE_KEEP:-}" != "1" ]]; then
-    # Container processes create root-owned files on the bind mounts.
-    rm -rf "$root" || true
+    remove_smoke_data "$root" || true
   else
     printf 'Smoke logs and data kept at %s\n' "$root"
   fi

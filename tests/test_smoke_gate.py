@@ -62,6 +62,54 @@ class SmokeGateTests(unittest.TestCase):
         self.assertNotIn("grep -q", code)
         self.assertIn("comm_is_systemd", code)
 
+    def test_remove_smoke_data_deletes_a_directory(self) -> None:
+        completed = run_bash(
+            """
+            set -euo pipefail
+            source scripts/smoke-test.sh
+            dir="$(mktemp -d)"
+            mkdir -p "$dir/mongodb"
+            printf 'x\n' > "$dir/mongodb/WiredTiger"
+            remove_smoke_data "$dir"
+            if [[ -e "$dir" ]]; then
+              printf 'still there\n'
+              exit 1
+            fi
+            """
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_privacy_decision(self) -> None:
+        completed = run_bash(
+            """
+            set -euo pipefail
+            source scripts/ensure-ghcr-private.sh
+            expect() {
+              got="$(decide_privacy "$1" "$2" "$3")"
+              if [[ "$got" != "$4" ]]; then
+                printf 'decide_privacy %s %s %s returned %s, wanted %s\n' "$1" "$2" "$3" "$got" "$4" >&2
+                exit 1
+              fi
+            }
+            expect preflight private '' ok
+            expect preflight public '' delete
+            expect preflight '' '' setup
+            expect check public 200 delete
+            expect check public 401 delete
+            expect check private 200 inherit
+            expect check '' 200 delete
+            expect check private 401 ok
+            expect check private 403 ok
+            expect check private 404 ok
+            expect check private 500 unknown
+            if grep -q -- '-X PUT' scripts/ensure-ghcr-private.sh; then
+              printf 'PUT visibility update is not a documented API\n' >&2
+              exit 1
+            fi
+            """
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_should_publish_skips_dispatch_when_push_is_false(self) -> None:
         cases = {
             ("pull_request", ""): "false",
