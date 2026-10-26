@@ -23,9 +23,12 @@ findings and does not fail the build unless `TRIVY_EXIT_CODE` is set to `1`.
 
 ## Registry
 
-The GitHub Container Registry package is meant to stay private. A public
-package cannot be made private again. If a published tag can be pulled
-without a token, delete the package and open a private advisory.
+The GitHub Container Registry package is meant to stay private. Creating it
+with `GITHUB_TOKEN` from this public repository makes it public, and a public
+package cannot be made private again. The package REST API cannot change
+visibility. If a published tag can be pulled without a token, the publish job
+deletes the package when the API says it is public. Open a private advisory
+as well.
 
 ## Installers
 

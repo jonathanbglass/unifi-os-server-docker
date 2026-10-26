@@ -72,7 +72,7 @@ executes `/sbin/init`.
 | Workflow | When it runs | What it does |
 | --- | --- | --- |
 | Lint and scan | Pull requests, pushes to `main`, version tags, manual runs | `actionlint`, `hadolint`, `shellcheck`, and the Python unit tests |
-| Build and publish | Same events | Builds `linux/amd64`, checks the rootfs, runs Trivy, runs the smoke test, and pushes only when the event is allowed to publish |
+| Build and publish | Same events | Builds `linux/amd64`, checks the rootfs, runs Trivy, runs the smoke test, and pushes only when the event is allowed to publish and a private GHCR package already exists |
 | Check upstream | Weekly, Monday 06:17 UTC, and manual runs | Compares the pin with Ubiquiti and opens a pull request when both architectures have a newer release with checksums |
 
 Pull requests build and test. They do not push. Pushes to `main`, version tags
@@ -187,6 +187,59 @@ Leave `MONGO_USER` and `MONGO_PASS` empty unless you have already created a
 user in MongoDB. The sample compose file does not enable MongoDB
 authentication.
 
+## Create the private package once
+
+A workflow that creates a package with `GITHUB_TOKEN` inherits the visibility
+of the repository. This repository is public, so that first push is a public
+package. Anonymous `docker pull` then succeeds. GitHub does not let a public
+package become private, and the package REST API has no visibility update.
+`PUT /user/packages/container/unifi-os-server` is not a documented method and
+returns 404. `GITHUB_TOKEN` can push and, when it has admin on the package,
+delete. It cannot change visibility.
+
+The publish job therefore refuses to push until package metadata already says
+`private`. After the push it still requires an anonymous manifest pull to
+fail. If the API says the package is public, the job deletes it and fails.
+If the API says private but an anonymous pull still works, the job fails and
+leaves the package in place. Deleting that copy would make the next
+`GITHUB_TOKEN` push create a new public package.
+
+Do this once, from your own machine, before the next publish on `main`. The
+package created by the first `main` publish was deleted by that check.
+
+1. Create a classic personal access token with `write:packages` and
+   `delete:packages`. GitHub Packages does not accept a fine-grained token for
+   this push. Do not store the token in the repository.
+2. Push a placeholder that does not set `org.opencontainers.image.source`.
+   That label links the image to this public repository and is how a package
+   inherits repository access. The image built by Actions sets the label. The
+   placeholder must not.
+
+   ```sh
+   printf '%s' "$GHCR_PAT" | docker login ghcr.io -u jonathanbglass --password-stdin
+   docker pull alpine:3.20
+   docker tag alpine:3.20 ghcr.io/jonathanbglass/unifi-os-server:private-bootstrap
+   docker push ghcr.io/jonathanbglass/unifi-os-server:private-bootstrap
+   ```
+
+   A personal-account push that is not made with `GITHUB_TOKEN` defaults to
+   private.
+3. Open the package settings:
+   `https://github.com/users/jonathanbglass/packages/container/unifi-os-server/settings`
+4. Under Danger Zone, the visibility must be Private. If it says Public,
+   delete the package and repeat step 2.
+5. Under Manage Actions access, add `jonathanbglass/unifi-os-server-docker`
+   and set the role to Admin. Admin is what lets this workflow push and
+   delete. Adding the repository here is separate from connecting the
+   package to the repository.
+6. Leave **Inherit access from repository** turned off. If you connect the
+   repository from the package settings page, do not select inheritance.
+   On a public repository, inheritance lets the world pull the image even
+   when the visibility field says Private.
+7. Re-run **Build and publish** on `main` from the Actions tab, with `push`
+   left on. After `5.1.42` and the commit tag exist, delete the
+   `private-bootstrap` version from the package's Manage versions page.
+
 ## Pull the private image
 
 The package is private. `docker pull` needs a GitHub account that can read
@@ -216,17 +269,10 @@ Confirm the package is private before you rely on it:
 4. From a machine that is not logged in to GHCR, `docker pull` of the tag
    must fail.
 
-The publish job runs `scripts/ensure-ghcr-private.sh` after a push. The job
-fails when an anonymous client can read the new tag. If the package metadata
-says the visibility is public, the job tries to set it to private and then
-deletes the package with `GITHUB_TOKEN` so a public copy is not left online.
-Deletion can fail when the token is not allowed to delete packages. The job
-is still red, and the package has to be deleted by hand. When the visibility
-is already private and an anonymous pull still works, the job fails without
-deleting the package and tells you to turn inheritance off.
-
-`GITHUB_TOKEN` links the package to this repository. That link is what turns
-inheritance on. The workflow cannot clear inheritance by itself.
+`scripts/ensure-ghcr-private.sh --preflight` runs before `docker push`.
+`scripts/ensure-ghcr-private.sh` runs again after the push and checks the new
+tag. Both fail the job when the package is missing, public, or anonymously
+pullable. The post-push check is what deletes a public package.
 
 ## Share it with a collaborator
 
