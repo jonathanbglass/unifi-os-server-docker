@@ -1,0 +1,24 @@
+# Ubiquiti installers, extracted images, and local runtime data.
+# Never commit these. The image is built in GitHub Actions.
+installer.bin
+installer-*.bin
+*.installer
+image.tar
+*.oci
+rootfs/
+/out/
+/build/
+/data/
+_extract/
+/tmp-uos/
+
+# Local environment and scan output
+.env
+trivy-results.sarif
+actionlint
+hadolint
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
