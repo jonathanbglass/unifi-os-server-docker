@@ -204,18 +204,15 @@ if [[ ! -s /etc/machine-id ]]; then
   fi
 fi
 
-if [[ "${UOS_SHOW_JOURNAL:-true}" == "true" ]]; then
-  (
-    for _ in $(seq 1 90); do
-      if journalctl -n 1 --no-pager >/dev/null 2>&1; then
-        break
-      fi
-      sleep 2
-    done
-    exec 3>&1
-    journalctl -f --no-hostname -o short >&3 2>&3 || true
-  ) &
-fi
+# systemd 247's journalctl exits 0 when it only printed
+# "No journal files were found", then `journalctl -f` waits forever.
+# Follow the journal only after a real journal exists, and never before
+# the handoff below has been recorded.
+journal_has_files() {
+  local output
+  output="$(journalctl -n 1 --no-pager 2>&1 || true)"
+  [[ "$output" != *"No journal files were found"* ]]
+}
 
 if [[ ! -x /sbin/init ]]; then
   log "/sbin/init is missing or not executable"
@@ -223,4 +220,23 @@ if [[ ! -x /sbin/init ]]; then
 fi
 
 log "starting systemd"
+# Docker's json-file log is a pipe. A later `grep -q` under `pipefail`
+# can drop this line once the journal follower is writing. The marker
+# is on the data volume so the smoke test can see the handoff anyway.
+marker=/data/.uos-entrypoint-reached-systemd
+printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker"
+chmod 644 "$marker" || true
+sync || true
+
+if [[ "${UOS_SHOW_JOURNAL:-true}" == "true" ]]; then
+  (
+    for _ in $(seq 1 90); do
+      if journal_has_files; then
+        exec journalctl -f --no-hostname -o short
+      fi
+      sleep 2
+    done
+  ) &
+fi
+
 exec /sbin/init
