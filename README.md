@@ -94,14 +94,17 @@ repository variable `TRIVY_EXIT_CODE` to `1` to make those findings fail the
 job. A manual build can also set `fail_on_vulnerabilities` to true for one run.
 
 The smoke test starts `docker-compose.yml` with the image just built and
-`mongo:4.4.29`. It waits until MongoDB is healthy, the entrypoint logs that
-it is starting systemd, and either `https://127.0.0.1:11443` or
-`http://127.0.0.1:8080` returns any HTTP status. The timeout is 10 minutes
-in CI. nginx can return that status while UniFi Core is up and the Network
-application is still starting Java. The test does not log in, adopt a
-device, or prove that every UniFi service finished starting. If systemd
-cannot boot on a runner, the job fails and the logs are kept as the smoke
-data directory on that runner.
+`mongo:4.4.29`. It waits until MongoDB is healthy and PID 1 in the UniFi OS
+Server container is systemd. The entrypoint records that handoff in the
+container log and in a marker file on the data volume, then execs systemd.
+The test then waits until either `https://127.0.0.1:11443` or
+`http://127.0.0.1:8080` returns any HTTP status. The UI timeout is 10
+minutes in CI. nginx can return that status while UniFi Core is up and the
+Network application is still starting Java. The test does not log in, adopt
+a device, or prove that every UniFi service finished starting. If PID 1
+never becomes systemd, or the listener never opens, the job prints the
+container logs, process list, and recent journal entries, keeps the smoke
+data directory, and uploads that directory as an artifact.
 
 ## Run it
 
