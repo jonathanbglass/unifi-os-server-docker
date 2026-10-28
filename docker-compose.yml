@@ -2,6 +2,9 @@
 #
 # Copy .env.example to .env and set UOS_SYSTEM_IP before `docker compose up -d`.
 # The web UI is https://<host>:11443 once systemd has finished starting.
+# Do not switch this service to host networking. UniFi then sees every host
+# bridge, including bridges that belong to other containers, and can hand
+# devices an address such as 172.18.0.1.
 #
 # This file does not set privileged: true. It adds NET_ADMIN and NET_RAW and
 # uses the host cgroup namespace, which is enough on many Docker hosts. If
@@ -24,6 +27,9 @@ services:
     environment:
       TZ: ${TZ:-UTC}
       UOS_SYSTEM_IP: ${UOS_SYSTEM_IP:-}
+      UNIFI_SYSTEM_IP: ${UNIFI_SYSTEM_IP:-}
+      INFORM_HOST: ${INFORM_HOST:-}
+      UOS_INFORM_HOST_OVERRIDE: ${UOS_INFORM_HOST_OVERRIDE:-true}
       UOS_SHOW_JOURNAL: ${UOS_SHOW_JOURNAL:-true}
       MONGO_INTERNAL: "false"
       MONGO_HOST: mongodb

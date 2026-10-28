@@ -29,6 +29,8 @@ RUN python3 /src/extract_rootfs.py \
         --download-only /src/installer.bin
 
 COPY scripts/uos-entrypoint.sh /src/uos-entrypoint.sh
+COPY scripts/uos-apply-inform.sh /src/uos-apply-inform.sh
+COPY scripts/unifi_mongo.py /src/unifi_mongo.py
 
 RUN python3 /src/extract_rootfs.py \
         --versions /src/versions.json \
@@ -36,7 +38,9 @@ RUN python3 /src/extract_rootfs.py \
         --installer /src/installer.bin \
         --output /rootfs \
     && mkdir -p /rootfs/usr/local/bin \
-    && install -m 0755 /src/uos-entrypoint.sh /rootfs/usr/local/bin/uos-entrypoint.sh
+    && install -m 0755 /src/uos-entrypoint.sh /rootfs/usr/local/bin/uos-entrypoint.sh \
+    && install -m 0755 /src/uos-apply-inform.sh /rootfs/usr/local/bin/uos-apply-inform.sh \
+    && install -m 0755 /src/unifi_mongo.py /rootfs/usr/local/bin/unifi_mongo.py
 
 FROM scratch
 

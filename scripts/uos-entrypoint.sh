@@ -2,6 +2,8 @@
 # Runtime setup for UniFi OS Server under Docker, then hand off to systemd.
 # The image is Ubiquiti's own rootfs. This script only prepares writable
 # state, the inform address, and an external MongoDB before PID 1 starts.
+# uos-apply-inform.sh writes system_ip and /etc/host-ip, and installs the
+# unit that sets the Mongo inform host override after the database is up.
 
 set -euo pipefail
 
@@ -69,10 +71,12 @@ ensure_dir() {
   fi
 }
 
-if [[ -z "${UOS_SYSTEM_IP:-}" ]]; then
-  log "UOS_SYSTEM_IP is required. Set it to an address your UniFi devices can reach."
+inform_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uos-apply-inform.sh"
+if [[ ! -x "$inform_bin" ]]; then
+  log "missing ${inform_bin}"
   exit 1
 fi
+inform_host="$("$inform_bin" --print-host)" || exit 1
 
 APP_MODEL="${APP_MODEL:-UOSSERVER}"
 PRODUCT_NAME="${PRODUCT_NAME:-UniFi OS Server}"
@@ -90,7 +94,7 @@ FIRMWARE_PLATFORM="${FIRMWARE_PLATFORM:-$default_platform}"
 
 log "firmware platform ${FIRMWARE_PLATFORM}"
 log "product ${PRODUCT_NAME} model ${APP_MODEL} version ${APP_VERSION}"
-log "system IP ${UOS_SYSTEM_IP}"
+log "inform host ${inform_host}"
 
 printf '%s\n' "$FIRMWARE_PLATFORM" > /usr/lib/platform
 printf '%s\n' "$PRODUCT_NAME" > /usr/lib/product_name
@@ -139,7 +143,6 @@ ensure_dir /var/lib/mongodb mongodb
 ensure_dir /etc/rabbitmq/ssl rabbitmq
 
 properties="/var/lib/unifi/system.properties"
-set_property "$properties" "system_ip" "$UOS_SYSTEM_IP"
 
 mongo_internal="${MONGO_INTERNAL:-false}"
 case "$mongo_internal" in
@@ -184,6 +187,9 @@ else
     rm -f /etc/systemd/system/mongodb.service
   fi
 fi
+
+"$inform_bin" --properties-only
+"$inform_bin" --install-units
 
 if id -u unifi >/dev/null 2>&1; then
   chown unifi:unifi "$properties" /var/lib/unifi || true
