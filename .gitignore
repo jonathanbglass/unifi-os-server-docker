@@ -14,6 +14,7 @@ _extract/
 
 # Local environment and scan output
 .env
+unifi-backups/
 trivy-results.sarif
 actionlint
 hadolint

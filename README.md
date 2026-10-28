@@ -66,8 +66,10 @@ On a build, `scripts/extract_rootfs.py`:
 The Dockerfile runs that extractor on the builder machine, then copies the
 rootfs into a `scratch` image with `scripts/uos-entrypoint.sh`. The entrypoint
 writes the platform and version files UniFi OS expects, stores a console UUID
-on `/data`, sets `system_ip`, points the Network application at MongoDB, and
-executes `/sbin/init`.
+on `/data`, sets `system_ip` in the Network application data directory, writes
+`/etc/host-ip` when that address is an IP, points the Network application at
+MongoDB, installs a oneshot that sets the inform host override once MongoDB
+is up, and executes `/sbin/init`.
 
 | Workflow | When it runs | What it does |
 | --- | --- | --- |
@@ -118,13 +120,33 @@ cp .env.example .env
 docker compose up -d
 ```
 
+`UOS_SYSTEM_IP` is the address devices can reach. `UNIFI_SYSTEM_IP` and
+`INFORM_HOST` are aliases; if more than one is set, they must match. On
+every container start, and again immediately before the Network application
+process starts, the image writes `system_ip` to
+`/usr/lib/unifi/data/system.properties` and
+`/var/lib/unifi/system.properties`. In this rootfs those paths are the same
+file: `data` is a symlink to `/var/lib/unifi`, which is the directory behind
+the `var_lib_unifi` volume. When the value is an IP, the image also writes
+it to `/etc/host-ip` with no trailing newline.
+
+`UOS_INFORM_HOST_OVERRIDE` defaults to `true`. After MongoDB has an
+`ace.setting` document with `key` `mgmt`, a oneshot sets
+`override_inform_host` and `override_inform_host_location` and, if it
+changed them, restarts only the Network application
+(`systemctl restart unifi`). Set the variable to `false` to keep the
+properties file and skip MongoDB. The oneshot does not log in to MongoDB.
+Leave `MONGO_USER` empty, or set the override in the UI. With
+`MONGO_INTERNAL=true` it uses `127.0.0.1:27117`. The compose file uses the
+external database on `mongodb:27017`.
+
 The web UI is `https://<host>:11443`. The first boot takes several minutes.
 `docker compose logs -f unifi-os-server` shows the entrypoint line
 `starting systemd` and, by default, the journal.
 
-Create the local admin in the UI. In the UniFi site settings, set the inform
-host to the same value as `UOS_SYSTEM_IP`. Devices adopt against
-`http://<that address>:8080/inform`.
+Create the local admin in the UI. Devices adopt against
+`http://<UOS_SYSTEM_IP>:8080/inform`. The troubleshooting section below
+covers a controller that picked another bridge on the host instead.
 
 ### Ports
 
@@ -352,6 +374,168 @@ loading `ace.archive` into an empty MongoDB 4.4 data directory with
 Take a fresh backup before every image upgrade and before any MongoDB tag
 change.
 
+The image has `mongod` and the `mongo` shell. It does not have `mongodump`.
+On a host that uses the bundled database (port 27117 inside the UniFi OS
+container), run `mongodump` on the host in the container's network
+namespace. `scripts/unifi-backup.sh` does that. Install MongoDB database
+tools on the host first. The defaults match a rootless Podman container
+named `uosserver`:
+
+```sh
+# As the user that owns the container, or as root with UOS_PODMAN_USER set.
+export UOS_PODMAN_USER=uosserver
+export UNIFI_BACKUP_DIR=/var/backups/unifi
+bash scripts/unifi-backup.sh backup
+bash scripts/unifi-backup.sh restore --from /var/backups/unifi/ace-YYYYmmddTHHMMSSZ
+```
+
+The script runs:
+
+```sh
+pid="$(podman inspect uosserver --format '{{.State.Pid}}')"
+sudo nsenter -t "$pid" -n mongodump --port 27117 --db ace --out <dir>
+```
+
+`nsenter -n` changes the network namespace and leaves the host filesystem
+in place, so `--out` is a host directory and `mongodump` is the host binary.
+Restore asks you to type `restore` (or pass `--yes`) and runs
+`mongorestore --drop` for that database. For the compose stack's external
+database, point the script at the MongoDB container and port 27017:
+
+```sh
+UOS_RUNTIME=docker \
+UOS_CONTAINER="$(docker compose ps -q unifi-os-server)" \
+UNIFI_MONGO_CONTAINER="$(docker compose ps -q mongodb)" \
+UNIFI_MONGO_PORT=27017 \
+  bash scripts/unifi-backup.sh backup
+```
+
+The dump can contain device credentials. The script creates the output
+directory mode `0700` and does not print the dump. Keep it with the rest of
+`./data`, off the git tree.
+
+## Troubleshooting
+
+### Inform URL uses another bridge on the host
+
+A host that also runs other containers has bridges of its own. Docker's
+user-defined bridges are often `172.18.0.0/16`, so the bridge address is
+`172.18.0.1`. If UniFi selects that address, adoption tells the device to
+use `http://172.18.0.1:8080/inform`. The device cannot open that address,
+and adoption loops.
+
+Two selectors are involved.
+
+The Network application reads `system_ip` from
+`/usr/lib/unifi/data/system.properties`. When the key is set, it uses that
+value and skips interface detection. The application keeps the key across
+its own restarts. Detection otherwise walks the interfaces, skips `lo0`,
+and skips names that start with `docker` only in some cases. A bridge named
+`br-*` is still a candidate, and the first remaining IPv4 can be
+`172.18.0.1`. For the `UOSSERVER` model, a detected address of exactly
+`10.88.0.3` (a Podman bridge address the application special-cases) is
+replaced by the contents of `/etc/host-ip`. Any other address, including
+`172.18.0.1`, is kept. `/etc/host-ip` is a single IP with no trailing
+newline; `0.0.0.0` is rejected. This image writes `system_ip` on every
+start and writes `/etc/host-ip` when `UOS_SYSTEM_IP` is an IP. The
+properties write is what stops a foreign bridge from becoming the Server IP.
+
+Adoption also stores an inform host on the `mgmt` setting. That is the
+value the UI calls Inform Host Override (Settings, System, Advanced, and on
+current Network builds also Devices, Device Updates and Settings, Device
+SSH Settings). It lives in MongoDB database `ace`, collection `setting`,
+document `key` `mgmt`, fields `override_inform_host` and
+`override_inform_host_location`. The oneshot sets those fields when
+`UOS_INFORM_HOST_OVERRIDE` is `true`.
+
+UniFi OS Core keeps a separate LAN address. For model `UOSSERVER`,
+`/usr/share/unifi-core/app/service.js` takes the first address of the first
+interface returned by the discovery client at
+`http://127.0.0.1:11002/interfaces`. There is no environment variable or
+config key for a preferred address. `NODE_CONFIG` can change
+`discovery.discoveryClientUrl`, and this image does not. Replacing that
+list would hide interfaces Core uses for more than the LAN address, and a
+public report against this pin found that preferring one address inside
+that selector did not correct the address Site Manager shows. Host
+networking makes the discovery client list every host bridge, Docker
+bridges included, and those bridges are often first. Leave the container
+on its own network. The compose file publishes port 8080 and the UI ports.
+`UOS_PARENT_IF` creates a macvlan `eth0` only when the container does not
+already have `eth0`. Docker and Podman create `eth0` themselves, so that
+option does not hide a bridge.
+
+Check the pin from the host:
+
+```sh
+podman exec uosserver grep '^system_ip=' /usr/lib/unifi/data/system.properties
+podman exec uosserver cat /etc/host-ip
+```
+
+With the external database:
+
+```sh
+docker compose exec mongodb mongo --quiet --eval \
+  'var d=db.getSiblingDB("ace").setting.findOne({key:"mgmt"}); if (d) print(d.override_inform_host + " " + d.override_inform_host_location)'
+```
+
+With the bundled database, the image includes the `mongo` shell:
+
+```sh
+podman exec uosserver mongo --quiet --port 27117 ace --eval \
+  'var d=db.setting.findOne({key:"mgmt"}); if (d) print(d.override_inform_host + " " + d.override_inform_host_location)'
+```
+
+Devices that already adopted keep the old inform URL until they are
+provisioned again or you `set-inform` twice on the device.
+
+### Backup and restore when the container has no mongodump
+
+Use `scripts/unifi-backup.sh`, described in Backup and restore. The
+container PID comes from `podman inspect uosserver --format '{{.State.Pid}}'`
+(or `docker inspect`). `sudo nsenter -t <pid> -n` is what reaches port
+27117. Run `podman` as the rootless user (`UOS_PODMAN_USER=uosserver` when
+the script itself is root) and `nsenter` as root.
+
+### Device stuck adopted, Remove greyed out
+
+A device can stay Adopted while it checks in with the default key. The
+Network log says `used default key in ADOPTING state, reject it!` and
+Remove is greyed out. Forget the controller's record, then adopt again.
+`scripts/unifi-forget-device.sh` takes the MAC, shows the `mac`, `name`,
+and `model` of matching documents without printing keys, requires you to
+type the MAC again (or pass `--yes`), backs up `ace` first, deletes that
+MAC from `ace.device` and `ace.power_supervisor`, and restarts only the
+Network application. The device then shows as pending adoption.
+
+```sh
+export UOS_PODMAN_USER=uosserver
+bash scripts/unifi-forget-device.sh --dry-run aa:bb:cc:dd:ee:ff
+bash scripts/unifi-forget-device.sh aa:bb:cc:dd:ee:ff
+```
+
+The match is the `mac` field: colon form, the same MAC in uppercase, and
+the 12 hex digits with no separators. If the count is zero, the script
+does not delete and does not restart. A failed backup stops the script
+before the delete.
+
+### Smart Power can power-cycle a PoE-fed switch
+
+Smart Power state is in `ace.power_supervisor`. It can power-cycle a switch
+that is itself powered by PoE from another UniFi switch. During an outage
+or a flap that cycle repeats: the upstream port drops, Smart Power bounces
+the downstream switch, and the switch never stays up. Turn Smart Power off
+for a switch that feeds other UniFi gear or that is powered by PoE when a
+site reboots in a loop. Forgetting a stuck device deletes that MAC from
+`power_supervisor` as well as from `device`.
+
+### The Network application slows when the host CPU is busy
+
+The Network application is a Java process in the same container as the rest
+of UniFi OS. It shares the host CPUs. When the host is busy, the UI, inform
+handling, and adoption slow down with it. Check the host load before
+treating a slow controller as a UniFi fault. The compose file does not set
+a CPU limit.
+
 ## Warnings and caveats
 
 - This is unofficial. Ubiquiti does not support running UniFi OS Server from
@@ -382,9 +566,10 @@ change.
   version of an existing data directory is still a migration. Dump the
   database first. WiredTiger files from 4.4 do not open on 3.6, and they do
   not drop into 5, 6, 7, or 8.
-- Device adoption depends on `UOS_SYSTEM_IP` and the inform host. If devices
-  cannot open `http://<UOS_SYSTEM_IP>:8080/inform`, they will not appear.
-  STUN on UDP 3478 matters for devices that are not on the same LAN.
+- Device adoption depends on `UOS_SYSTEM_IP` and the inform host override.
+  If devices cannot open `http://<UOS_SYSTEM_IP>:8080/inform`, they loop in
+  adoption. STUN on UDP 3478 matters for devices that are not on the same LAN.
+  See Troubleshooting when the controller has picked another bridge on the host.
 - Back up `./data` before you upgrade the image or the MongoDB tag. Keep the
   previous image tag until the new one has booted and you have signed in.
 - Ubiquiti is moving self-hosted management from the standalone Network

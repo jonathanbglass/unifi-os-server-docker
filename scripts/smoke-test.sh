@@ -143,6 +143,10 @@ main() {
   export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-uos-smoke}"
   export UOS_IMAGE="${UOS_IMAGE:-unifi-os-server:local}"
   export UOS_SYSTEM_IP="${UOS_SYSTEM_IP:-127.0.0.1}"
+  # The inform override restarts the Network application once Mongo has a
+  # mgmt document. That restart fights the boot wait, so the smoke test
+  # leaves it off. Production compose defaults it to true.
+  export UOS_INFORM_HOST_OVERRIDE="${UOS_INFORM_HOST_OVERRIDE:-false}"
   export DATA_DIR="$root/unifi-data"
   export UNIFI_DIR="$root/var-lib-unifi"
   export MONGODB_LIB_DIR="$root/var-lib-mongodb"

@@ -11,6 +11,11 @@ set -euo pipefail
 test -x /sbin/init
 test -e /lib/systemd/systemd
 test -x /usr/local/bin/uos-entrypoint.sh
+test -x /usr/local/bin/uos-apply-inform.sh
+test -x /usr/local/bin/unifi_mongo.py
+grep -q "system_ip" /usr/local/bin/uos-apply-inform.sh
+grep -q "/etc/host-ip" /usr/local/bin/uos-apply-inform.sh
+grep -q "override_inform_host" /usr/local/bin/unifi_mongo.py
 grep -q "^ID=debian" /etc/os-release
 test -x /usr/bin/mongod
 test -s /usr/local/share/uos-packaging/version
